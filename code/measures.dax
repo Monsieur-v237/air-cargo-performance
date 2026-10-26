@@ -1,0 +1,71 @@
+-- ===== Modell: Fact_Shipments[FlightID] -> Dim_Flights[FlightID]  (n:1)
+--              Fact_Shipments[ShipmentDate] -> Dim_Date[Date]      (n:1, Date-Table markiert)
+--              Fact_Shipments[Priority] -> Parameter_SLA[Priority] (n:1)
+
+Shipments = DISTINCTCOUNT ( Fact_Shipments[AWB_Number] )
+
+Gewicht t = DIVIDE ( SUM ( Fact_Shipments[Weight_kg] ), 1000 )
+
+Delay Rate = AVERAGE ( Fact_Shipments[IsDelayed] )          -- 0/1-Spalte: Mittelwert = Anteil
+
+Incident Rate = AVERAGE ( Fact_Shipments[IncidentFlag] )
+
+-- SLA: nur bewertbare Sendungen (SLA_Met ist bei nicht bewertbaren BLANK)
+SLA Compliance % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( Fact_Shipments ), Fact_Shipments[SLA_Met] = 1 ),
+    CALCULATE ( COUNTROWS ( Fact_Shipments ), NOT ISBLANK ( Fact_Shipments[SLA_Met] ) )
+)
+
+-- SLA dynamisch: Schwelle kommt aus der Parameter-Tabelle (Was-wäre-wenn!)
+SLA Compliance % (dynamisch) =
+VAR Bewertbar = FILTER ( Fact_Shipments, Fact_Shipments[SLA_Evaluable] = TRUE () )
+VAR Erfuellt  =
+    SUMX ( Bewertbar,
+           IF ( Fact_Shipments[Buffer_min] >= RELATED ( Parameter_SLA[SLA_Puffer_min] ), 1, 0 ) )
+RETURN DIVIDE ( Erfuellt, COUNTROWS ( Bewertbar ) )
+
+Median Wartezeit min = MEDIAN ( Fact_Shipments[WaitTime_min] )
+
+P90 Wartezeit min = PERCENTILE.INC ( Fact_Shipments[WaitTime_min], 0.9 )
+
+Median Bearbeitung min = MEDIAN ( Fact_Shipments[ProcessingTime_min] )
+
+-- Durchsatz: Sendungen pro Kalendertag mit Aktivität (Tage ohne Daten zählen nicht)
+Throughput / Tag =
+DIVIDE ( [Shipments], DISTINCTCOUNT ( Fact_Shipments[ShipmentDate] ) )
+
+-- Vormonatsvergleich (Time Intelligence braucht die Date-Table)
+Delay Rate Vormonat =
+CALCULATE ( [Delay Rate], DATEADD ( Dim_Date[Date], -1, MONTH ) )
+
+Delay Rate Delta (PP) = [Delay Rate] - [Delay Rate Vormonat]
+
+-- Kg je Mitarbeiter auf Schicht-Ebene (Granularität: Lager x Schicht x Tag, Median der Besetzung)
+Mitarbeiter-Schichten =
+SUMX (
+    SUMMARIZE ( Fact_Shipments, Fact_Shipments[Warehouse], Fact_Shipments[Shift], Fact_Shipments[ShipmentDate] ),
+    CALCULATE ( MEDIAN ( Fact_Shipments[NumEmployeesShift] ) )
+)
+Kg je Mitarbeiter = DIVIDE ( SUM ( Fact_Shipments[Weight_kg] ), [Mitarbeiter-Schichten] )
+
+-- Top-Ursache der Verzögerungen
+Top Verzögerungsursache =
+MAXX (
+    TOPN ( 1, FILTER ( VALUES ( Fact_Shipments[DelayCause] ), Fact_Shipments[DelayCause] <> "Keine" ),
+           CALCULATE ( COUNTROWS ( Fact_Shipments ), Fact_Shipments[IsDelayed] = 1 ) ),
+    Fact_Shipments[DelayCause]
+)
+
+-- Pareto: kumulativer Anteil (Achse = DelayCause, nach Anzahl sortiert)
+Verzögerte = CALCULATE ( COUNTROWS ( Fact_Shipments ), Fact_Shipments[IsDelayed] = 1 )
+
+Pareto kumuliert % =
+VAR AktuellerWert = [Verzögerte]
+VAR Alle          = ALLSELECTED ( Fact_Shipments[DelayCause] )
+VAR Kumuliert     =
+    SUMX ( FILTER ( Alle, [Verzögerte] >= AktuellerWert ), [Verzögerte] )
+RETURN DIVIDE ( Kumuliert, CALCULATE ( [Verzögerte], Alle ) )
+
+-- Datenqualität sichtbar machen (Vertrauen im Dashboard!)
+Datenqualität % = AVERAGE ( Fact_Shipments[DQ_OK] )

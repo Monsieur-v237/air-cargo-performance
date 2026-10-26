@@ -1,0 +1,6 @@
+data/
+*.xlsx
+*.pkl
+node_modules/
+dist/
+__pycache__/
